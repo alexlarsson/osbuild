@@ -241,10 +241,11 @@ class Stage:
             monitor,
             libdir,
             debug_break="",
-            timeout=None) -> BuildResult:
+            timeout=None,
+            rundir="/run/osbuild") -> BuildResult:
         with contextlib.ExitStack() as cm:
 
-            build_root = buildroot.BuildRoot(build_tree, runner.path, libdir, store.tmp)
+            build_root = buildroot.BuildRoot(build_tree, runner.path, libdir, store.tmp, rundir=rundir)
             cm.enter_context(build_root)
 
             # if we have a build root, then also bind-mount the boot
@@ -297,7 +298,7 @@ class Stage:
                 f"{mounts_tmpdir}:{mounts_mapped}"
             ]
 
-            storeapi = objectstore.StoreServer(store)
+            storeapi = objectstore.StoreServer(store, rundir=rundir)
             cm.enter_context(storeapi)
 
             mgr = host.ServiceManager(monitor=monitor)
@@ -319,10 +320,10 @@ class Stage:
 
             self.prepare_arguments(args, args_path)
 
-            api = API()
+            api = API(rundir=rundir)
             build_root.register_api(api)
 
-            rls = remoteloop.LoopServer()
+            rls = remoteloop.LoopServer(rundir=rundir)
             build_root.register_api(rls)
 
             extra_env = {}
@@ -411,7 +412,8 @@ class Pipeline:
         return stage
 
     def build_stages(self, object_store, monitor, libdir,
-                     debug_break="", stage_timeout=None, in_vm=False):
+                     debug_break="", stage_timeout=None, in_vm=False,
+                     rundir="/run/osbuild"):
         results = {"success": True, "name": self.name}
 
         # If there are no stages, just return here
@@ -501,7 +503,8 @@ class Pipeline:
                                       monitor,
                                       libdir,
                                       debug_break,
-                                      stage_timeout)
+                                      stage_timeout,
+                                      rundir=rundir)
 
                 md = tree.meta.get(r.id)
                 monitor.result(r, md)
@@ -519,7 +522,8 @@ class Pipeline:
 
         return results
 
-    def run(self, store, monitor, libdir, debug_break="", stage_timeout=None, in_vm=False):
+    def run(self, store, monitor, libdir, debug_break="", stage_timeout=None, in_vm=False,
+            rundir="/run/osbuild"):
 
         self.run_in_vm = in_vm
         monitor.begin(self)
@@ -529,7 +533,8 @@ class Pipeline:
                                     libdir,
                                     debug_break,
                                     stage_timeout,
-                                    in_vm)
+                                    in_vm,
+                                    rundir=rundir)
 
         monitor.finish(results)
 
@@ -654,7 +659,8 @@ class Manifest:
         return list(map(lambda x: x.name, reversed(build.values())))
 
     def build(self, store, pipelines, monitor, libdir,
-              debug_break="", stage_timeout=None, in_vm=None) -> Dict[str, Any]:
+              debug_break="", stage_timeout=None, in_vm=None,
+              rundir="/run/osbuild") -> Dict[str, Any]:
         """Build the manifest
 
         Returns a dict of string keys that contains the overall
@@ -668,7 +674,8 @@ class Manifest:
 
         for name_or_id in pipelines:
             pl = self[name_or_id]
-            res = pl.run(store, monitor, libdir, debug_break, stage_timeout, in_vm=in_vm and pl.name in in_vm)
+            res = pl.run(store, monitor, libdir, debug_break, stage_timeout,
+                         in_vm=in_vm and pl.name in in_vm, rundir=rundir)
             results[pl.id] = res
             if not res["success"]:
                 results["success"] = False
