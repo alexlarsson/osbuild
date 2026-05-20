@@ -9,6 +9,7 @@ used from tests to run the cli.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import typing
 from typing import List
@@ -123,8 +124,28 @@ def _default_rundir():
     return f"/run/user/{os.getuid()}/osbuild"
 
 
+def _reexec_in_userns():
+    """Re-exec osbuild inside a user namespace with full uid/gid mappings."""
+    argv = sys.argv.copy()
+    if argv[0].endswith("__main__.py"):
+        argv[:1] = [sys.executable, "-m", "osbuild"]
+    if "--rundir" not in argv:
+        argv += ["--rundir", _default_rundir()]
+    cmd = [
+        "unshare",
+        "--map-auto", "--map-root-user",
+        "--keep-caps", "-m",
+        "--",
+    ] + argv
+    r = subprocess.run(cmd, check=False)
+    return r.returncode
+
+
 # pylint: disable=too-many-branches,too-many-return-statements,too-many-statements
 def osbuild_cli() -> int:
+    if os.getuid() != 0:
+        return _reexec_in_userns()
+
     args = parse_arguments(sys.argv)
     if args.rundir is None:
         args.rundir = _default_rundir()
