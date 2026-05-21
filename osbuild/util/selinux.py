@@ -2,8 +2,9 @@
 
 import errno
 import os
+import re
 import subprocess
-from typing import Dict, List, Optional, TextIO
+from typing import Dict, List, Optional, Set, TextIO
 
 # Extended attribute name for SELinux labels
 XATTR_NAME_SELINUX = b"security.selinux"
@@ -33,6 +34,82 @@ def config_get_policy(config: Dict[str, str]):
     if enabled not in ['enforcing', 'permissive']:
         return None
     return config.get('SELINUXTYPE', None)
+
+
+def in_user_namespace() -> bool:
+    with open("/proc/self/uid_map") as f:
+        fields = f.read().strip().split()
+    return fields != ["0", "0", "4294967295"]
+
+
+def is_known_type(type_name: str) -> bool:
+    """Check if an SELinux type exists in the kernel's loaded policy.
+
+    Validates by writing a context string to /sys/fs/selinux/context,
+    which is the same mechanism libselinux's security_check_context()
+    uses. This avoids any dependency on SELinux userspace tools or
+    Python bindings, which may not be available in the build sandbox.
+    """
+    try:
+        fd = os.open("/sys/fs/selinux/context", os.O_WRONLY)
+        try:
+            os.write(fd, f"system_u:object_r:{type_name}:s0".encode())
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
+def parse_file_contexts(path: str) -> Dict[str, List[str]]:
+    """Parse a file_contexts file and return a mapping of type -> list of path patterns."""
+    type_patterns: Dict[str, List[str]] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            context = parts[-1]
+            if context == "<<none>>":
+                continue
+            fields = context.split(":")
+            if len(fields) >= 3:
+                type_patterns.setdefault(fields[2], []).append(parts[0])
+    return type_patterns
+
+
+def find_unknown_types_used(file_contexts: str, root: str) -> Set[str]:
+    """Find unknown SELinux types whose file_contexts patterns match files in the tree."""
+    type_patterns = parse_file_contexts(file_contexts)
+
+    unknown_regexes = {}
+    for t, patterns in type_patterns.items():
+        if not is_known_type(t):
+            alt = "|".join(f"(?:{p})" for p in patterns)
+            try:
+                unknown_regexes[t] = re.compile(f"^(?:{alt})$")
+            except re.error:
+                continue
+
+    if not unknown_regexes:
+        return set()
+
+    used = set()
+    prefix_len = len(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in [dirpath] + [os.path.join(dirpath, f) for f in filenames + dirnames]:
+            logical = name[prefix_len:]
+            if not logical:
+                logical = "/"
+            for t, rx in unknown_regexes.items():
+                if t not in used and rx.match(logical):
+                    used.add(t)
+            if len(used) == len(unknown_regexes):
+                return used # Found all, return early
+    return used
 
 
 def setfiles(spec_file: str, root: str, *paths, exclude_paths: Optional[List[str]] = None) -> None:
